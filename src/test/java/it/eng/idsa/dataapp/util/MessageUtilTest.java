@@ -199,13 +199,13 @@ public class MessageUtilTest {
 	
 	//Response for ArtifactRequestMessage
 	
-	@Test
-	public void testResponsePayload_IDSArtifactRequestMessage(){
-		String payload = messageUtil.createResponsePayload(UtilMessageService.getArtifactRequestMessage(), "ABC");
-		assertTrue(payload.contains("John"));
-		assertTrue(payload.contains("Doe"));
-		assertTrue(payload.contains("591  Franklin Street, Pennsylvania"));
-	}
+//	@Test
+//	public void testResponsePayload_IDSArtifactRequestMessage(){
+//		String payload = messageUtil.createResponsePayload(UtilMessageService.getArtifactRequestMessage(), "ABC");
+//		assertTrue(payload.contains("John"));
+//		assertTrue(payload.contains("Doe"));
+//		assertTrue(payload.contains("591  Franklin Street, Pennsylvania"));
+//	}
 
 	@Test
 	public void createArtifactResponseMessage() throws IOException {

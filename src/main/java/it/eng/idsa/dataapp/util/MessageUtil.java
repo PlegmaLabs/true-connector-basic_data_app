@@ -2,46 +2,11 @@ package it.eng.idsa.dataapp.util;
 
 import static de.fraunhofer.iais.eis.util.Util.asList;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-
-import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang3.StringUtils;
-import org.apache.http.HttpEntity;
-import org.apache.http.entity.ContentType;
-import org.apache.http.entity.mime.FormBodyPart;
-import org.apache.http.entity.mime.FormBodyPartBuilder;
-import org.apache.http.entity.mime.MultipartEntityBuilder;
-import org.apache.http.entity.mime.content.ContentBody;
-import org.apache.http.entity.mime.content.StringBody;
-import org.apache.http.protocol.HTTP;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpHeaders;
-import org.springframework.stereotype.Component;
-import org.springframework.util.LinkedMultiValueMap;
-import org.springframework.util.MultiValueMap;
-import org.springframework.web.client.RestClientException;
-import org.springframework.web.client.RestTemplate;
-
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonSyntaxException;
-
 import de.fraunhofer.iais.eis.ArtifactRequestMessage;
 import de.fraunhofer.iais.eis.ArtifactResponseMessageBuilder;
 import de.fraunhofer.iais.eis.Connector;
@@ -69,449 +34,826 @@ import it.eng.idsa.dataapp.configuration.ECCProperties;
 import it.eng.idsa.multipart.processor.MultipartMessageProcessor;
 import it.eng.idsa.multipart.util.DateUtil;
 import it.eng.idsa.multipart.util.UtilMessageService;
+import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import okhttp3.OkHttpClient;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.http.HttpEntity;
+import org.apache.http.entity.ContentType;
+import org.apache.http.entity.mime.FormBodyPart;
+import org.apache.http.entity.mime.FormBodyPartBuilder;
+import org.apache.http.entity.mime.MultipartEntityBuilder;
+import org.apache.http.entity.mime.content.ContentBody;
+import org.apache.http.entity.mime.content.StringBody;
+import org.apache.http.protocol.HTTP;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
+import org.springframework.stereotype.Component;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.RestClientException;
+import org.springframework.web.client.RestTemplate;
 
 @Component
 public class MessageUtil {
-	private static final Logger logger = LoggerFactory.getLogger(MessageUtil.class);
-	
-	private RestTemplate restTemplate;
-	private ECCProperties eccProperties;
-	private Boolean encodePayload;
-	private Boolean contractNegotiationDemo;
-	private String issueConnector;
-	private String usageControlVersion;
-	private Path dataLakeDirectory;
-	
-	private static Serializer serializer;
-	static {
-		serializer = new Serializer();
-	}
-	
-	public MessageUtil(RestTemplate restTemplate, 
-			ECCProperties eccProperties,
-			@Value("#{new Boolean('${application.encodePayload:false}')}") Boolean encodePayload,
-			@Value("${application.contract.negotiation.demo}") Boolean contractNegotiationDemo,
-			@Value("${application.ecc.issuer.connector}") String issuerConnector,
-			@Value("${application.usageControlVersion}") String usageControlVersion,
-			@Value("${application.dataLakeDirectory}") Path dataLakeDirectory) {
-		super();
-		this.restTemplate = restTemplate;
-		this.eccProperties = eccProperties;
-		this.encodePayload = encodePayload;
-		this.contractNegotiationDemo = contractNegotiationDemo;
-		this.issueConnector = issuerConnector;
-		this.usageControlVersion = usageControlVersion;
-		this.dataLakeDirectory = dataLakeDirectory;
-	}
-	
-	public String createResponsePayload(Message requestHeader, String payload) {
-		if (requestHeader instanceof ContractRequestMessage) {
-			if (contractNegotiationDemo) {
-				logger.info("Returning default contract agreement");
-				if (StringUtils.equals("platoon", usageControlVersion)) {
-					return createContractAgreementPlatoon(requestHeader.getIssuerConnector(), payload);
-				}
-				if (StringUtils.equals("mydata", usageControlVersion)) {
-					return createContractAgreementMyData();
-				}
-			} else {
-				logger.info("Creating processed notification, contract agreement needs evaluation");
-				try {
-					return MultipartMessageProcessor.serializeToJsonLD(createProcessNotificationMessage(requestHeader));
-				} catch (IOException e) {
-					logger.error("Error while creating message", e);
-				}
-				return null;
-			}
-		} else if (requestHeader instanceof ContractAgreementMessage) {
-			return null;
-		} else if (requestHeader instanceof DescriptionRequestMessage) {
-			DescriptionRequestMessage drm = (DescriptionRequestMessage) requestHeader;
-			if (drm.getRequestedElement() != null) {
-				String element = getRequestedElement(drm.getRequestedElement(), getSelfDescription());
-				if (StringUtils.isNotBlank(element)) {
-					return element;
-				} else {
-					try {
-						return MultipartMessageProcessor.serializeToJsonLD(createRejectionCommunicationLocalIssues(drm));
-					} catch (IOException e) {
-						logger.error("Could not serialize rejection", e);
-					}
-					return null;
-				}
-			} else {
-				return getSelfDescriptionAsString();
-			}
-		} else if (requestHeader instanceof ArtifactRequestMessage && isBigPayload(((ArtifactRequestMessage) requestHeader).getRequestedArtifact().toString())) {
-			return encodePayload == true ? encodePayload(BigPayload.BIG_PAYLOAD.getBytes()) : BigPayload.BIG_PAYLOAD;
-		}
-			return  encodePayload == true ? encodePayload(createResponsePayload().getBytes()) : createResponsePayload();
-	}
-	
-	private boolean isBigPayload(String path) {
-		String isBig = path.substring(path.lastIndexOf('/'));
-		if (isBig.equals("/big")) {
-			return true;
-		}
-		return false;
-	}
 
-	private String createContractAgreementMyData() {
-	        String contractAgreement = null;
-	        byte[] bytes;
-	        try {
-	            bytes = Files.readAllBytes(dataLakeDirectory.resolve("contract_agreement.json"));
-	            contractAgreement = IOUtils.toString(bytes, "UTF8");
-	        } catch (IOException e) {
-				logger.error("Error while reading contract agreement file from dataLakeDirectory {}", e);
-			}
-			return contractAgreement;
-	            
-	}
+  private static final Logger logger = LoggerFactory.getLogger(
+    MessageUtil.class
+  );
 
-	public String createResponsePayload(HttpHeaders httpHeaders, String payload) {
-		String requestMessageType = httpHeaders.getFirst("IDS-Messagetype");
-		if (requestMessageType.contains(ContractRequestMessage.class.getSimpleName())) {
-			//header message is not used (at the moment) so we can pass null here for first parameter
-			return createContractAgreementPlatoon(URI.create(httpHeaders.get("IDS-IssuerConnector").get(0)), payload);
-		} else if (requestMessageType.contains(ContractAgreementMessage.class.getSimpleName())) {
-			return null;
-		} else if (requestMessageType.contains(DescriptionRequestMessage.class.getSimpleName())) {
-			if (httpHeaders.containsKey("IDS-RequestedElement")) {
-				String element = getRequestedElement(URI.create(httpHeaders.get("IDS-RequestedElement").get(0)), getSelfDescription());
-				if (StringUtils.isNotBlank(element)) {
-					return element;
-				} else {
-					return "IDS-RejectionReason:" + RejectionReason.NOT_FOUND.getId().toString();
-				}
-			} else {
-				return getSelfDescriptionAsString();
-			}
-		} else if (requestMessageType.contains(ArtifactRequestMessage.class.getSimpleName()) && isBigPayload(httpHeaders.getFirst("IDS-RequestedArtifact"))) {
-			return encodePayload == true ? encodePayload(BigPayload.BIG_PAYLOAD.getBytes()) : BigPayload.BIG_PAYLOAD;
-		} else {
-			return  encodePayload == true ? encodePayload(createResponsePayload().getBytes()) : createResponsePayload();
-		}
-	}
-	
+  private RestTemplate restTemplate;
+  private ECCProperties eccProperties;
+  private Boolean encodePayload;
+  private Boolean contractNegotiationDemo;
+  private String issueConnector;
+  private String usageControlVersion;
+  private Path dataLakeDirectory;
 
-	private String createResponsePayload() {
-		// Put check sum in the payload
-		DateFormat dateFormat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
-		Date date = new Date();
-		String formattedDate = dateFormat.format(date);
+  private static Serializer serializer;
 
-		Map<String, String> jsonObject = new HashMap<>();
-		jsonObject.put("firstName", "John");
-		jsonObject.put("lastName", "Doe");
-		jsonObject.put("dateOfBirth", formattedDate);
-		jsonObject.put("address", "591  Franklin Street, Pennsylvania");
-		jsonObject.put("checksum", "ABC123 " + formattedDate);
-		Gson gson = new GsonBuilder().create();
-		return gson.toJson(jsonObject);
-	}
+  static {
+    serializer = new Serializer();
+  }
 
-	private String encodePayload(byte[] payload) {
-		logger.info("Encoding payload");
-		return Base64.getEncoder().encodeToString(payload);
-	}
-	
-	private String createContractAgreementPlatoon(URI consumerURI, String payload) {
-		try {
-			Connector connector = getSelfDescription();
-			ContractRequest contractRequest = serializer.deserialize(payload, ContractRequest.class);
+  public MessageUtil(
+    RestTemplate restTemplate,
+    ECCProperties eccProperties,
+    @Value(
+      "#{new Boolean('${application.encodePayload:false}')}"
+    ) Boolean encodePayload,
+    @Value(
+      "${application.contract.negotiation.demo}"
+    ) Boolean contractNegotiationDemo,
+    @Value("${application.ecc.issuer.connector}") String issuerConnector,
+    @Value("${application.usageControlVersion}") String usageControlVersion,
+    @Value("${application.dataLakeDirectory}") Path dataLakeDirectory
+  ) {
+    super();
+    this.restTemplate = restTemplate;
+    this.eccProperties = eccProperties;
+    this.encodePayload = encodePayload;
+    this.contractNegotiationDemo = contractNegotiationDemo;
+    this.issueConnector = issuerConnector;
+    this.usageControlVersion = usageControlVersion;
+    this.dataLakeDirectory = dataLakeDirectory;
+  }
 
-			ContractOffer co = getPermissionAndTarget(connector, 
-					contractRequest.getPermission().get(0).getId(), 
-					contractRequest.getPermission().get(0).getTarget());
-			List<Permission> permissions = new ArrayList<>();
-			if(co == null) {
-				logger.info("Could not find contract offer that match with request - permissionId and target");
-				return null;
-			}
-			for(Permission p: co.getPermission()) {
-				if(p.getId().equals(contractRequest.getPermission().get(0).getId()) 
-						&& p.getTarget().equals(contractRequest.getPermission().get(0).getTarget())) {
-					permissions.add(p);
-				}
-			}
-			ContractAgreement ca = new ContractAgreementBuilder()
-					._permission_(permissions)
-					._contractStart_(co.getContractStart())
-					._contractDate_(co.getContractDate())
-					._consumer_(consumerURI)
-					._provider_(URI.create(issueConnector))
-					.build();
-		
-			return MultipartMessageProcessor.serializeToJsonLD(ca);
-		} catch (IOException e) {
-			logger.error("Error while creating contract agreement", e);
-		}
-		return null;
-	}
-	
-	private ContractOffer getPermissionAndTarget(Connector connector, URI permission, URI target) {
-		for (ResourceCatalog resourceCatalog : connector.getResourceCatalog()) {
-			for (Resource resource : resourceCatalog.getOfferedResource()) {
-				for (ContractOffer co : resource.getContractOffer()) {
-					for (Permission p : co.getPermission()) {
-						if (p.getId().equals(permission) && p.getTarget().equals(target)) {
-							logger.info("Found permission");
-							return co;
-						}
-					}
-				}
-			}
-		}
-		return null;
-	}
-	
-	private Connector getSelfDescription() {
-		URI eccURI = null;
+  public String createResponsePayload(Message requestHeader, String payload) {
+    System.out.println("requestHeader");
+    System.out.println(requestHeader);
+    System.out.println("payload");
+    System.out.println(payload);
 
-		try {
-			eccURI = new URI(eccProperties.getRESTprotocol(), null, eccProperties.getHost(), eccProperties.getRESTport(), null, null, null);
-			logger.info("Fetching self description from ECC {}.", eccURI.toString());
-			String selfDescription = restTemplate.getForObject(eccURI, String.class);
-			logger.info("Deserializing self description.");
-			logger.debug("Self description content: {}{}", System.lineSeparator(), selfDescription);
-			return serializer.deserialize(selfDescription, Connector.class);
-		} catch (URISyntaxException e) {
-			logger.error("Could not create URI for Self Description request.", e);
-			return null;
-		} catch (RestClientException e) {
-			logger.error("Could not fetch self description from ECC", e);
-			return null;
-		} catch (IOException e) {
-			logger.error("Could not deserialize self description to Connector instance", e);
-			return null;
-		}
-	}
-	
-	private String getSelfDescriptionAsString() {
-		try {
-			return MultipartMessageProcessor.serializeToJsonLD(getSelfDescription());
-		} catch (IOException e) {
-			logger.error("Could not serialize self description", e);
-		}
-		return null;
-	}
-	
-	private String getRequestedElement(URI requestedElement, Connector connector) {
-		for (ResourceCatalog catalog : connector.getResourceCatalog()) {
-			for (Resource offeredResource : catalog.getOfferedResource()) {
-				if (requestedElement.equals(offeredResource.getId())) {
-					try {
-						return MultipartMessageProcessor.serializeToJsonLD(offeredResource);
-					} catch (IOException e) {
-						logger.error("Could not serialize requested element.", e);
-					}
-				}
-			}
-		}
-		logger.error("Requested element not found.");
-		return null;
-	}
-	
-	public Message getResponseHeader(Message header) {
-		Message output = null;
-		if (null == header || null == header.getId() || header.getId().toString().isEmpty())
-			header = new NotificationMessageBuilder()
-			._securityToken_(UtilMessageService.getDynamicAttributeToken())
-			._senderAgent_(whoIAmEngRDProvider())
-			.build();
-		if (header instanceof ArtifactRequestMessage) {
-			output = createArtifactResponseMessage((ArtifactRequestMessage) header);
-		} else if (header instanceof ContractRequestMessage) {
-			if(contractNegotiationDemo) {
-				logger.info("Returning default contract agreement");
-				output = createContractAgreementMessage((ContractRequestMessage) header);
-			} else {
-				logger.info("Creating processed notification, contract agreement needs evaluation");
-				output= createProcessNotificationMessage(null);
-			}
-		} else if (header instanceof ContractAgreementMessage) {
-			output = createProcessNotificationMessage(header);
-		} else if (header instanceof DescriptionRequestMessage) {
-			output = createDescriptionResponseMessage((DescriptionRequestMessage) header);
-		} else {
-			output = createResultMessage(header);
-		}
-		return output;
-	}
-	
-	public Message createResultMessage(Message header) {
-		return new ResultMessageBuilder()
-				._issuerConnector_(whoIAmEngRDProvider())
-				._issued_(DateUtil.now())
-				._modelVersion_(UtilMessageService.MODEL_VERSION)
-				._senderAgent_(whoIAmEngRDProvider())
-				._recipientConnector_(header != null ? asList(header.getIssuerConnector()) : asList(whoIAm()))
-				._correlationMessage_(header != null ? header.getId() : whoIAm())
-				._securityToken_(UtilMessageService.getDynamicAttributeToken())
-				.build();
-	}
+    if (requestHeader instanceof ContractRequestMessage) {
+      if (contractNegotiationDemo) {
+        logger.info("Returning default contract agreement");
+        if (StringUtils.equals("platoon", usageControlVersion)) {
+          return createContractAgreementPlatoon(
+            requestHeader.getIssuerConnector(),
+            payload
+          );
+        }
+        if (StringUtils.equals("mydata", usageControlVersion)) {
+          return createContractAgreementMyData();
+        }
+      } else {
+        logger.info(
+          "Creating processed notification, contract agreement needs evaluation"
+        );
+        try {
+          return MultipartMessageProcessor.serializeToJsonLD(
+            createProcessNotificationMessage(requestHeader)
+          );
+        } catch (IOException e) {
+          logger.error("Error while creating message", e);
+        }
+        return null;
+      }
+    } else if (requestHeader instanceof ContractAgreementMessage) {
+      return null;
+    } else if (requestHeader instanceof DescriptionRequestMessage) {
+      DescriptionRequestMessage drm = (DescriptionRequestMessage) requestHeader;
+      if (drm.getRequestedElement() != null) {
+        String element = getRequestedElement(
+          drm.getRequestedElement(),
+          getSelfDescription()
+        );
+        if (StringUtils.isNotBlank(element)) {
+          return element;
+        } else {
+          try {
+            return MultipartMessageProcessor.serializeToJsonLD(
+              createRejectionCommunicationLocalIssues(drm)
+            );
+          } catch (IOException e) {
+            logger.error("Could not serialize rejection", e);
+          }
+          return null;
+        }
+      } else {
+        return getSelfDescriptionAsString();
+      }
+    } else if (
+      requestHeader instanceof ArtifactRequestMessage &&
+      isBigPayload(
+        ((ArtifactRequestMessage) requestHeader).getRequestedArtifact()
+          .toString()
+      )
+    ) {
+      return encodePayload == true
+        ? encodePayload(BigPayload.BIG_PAYLOAD.getBytes())
+        : BigPayload.BIG_PAYLOAD;
+    }
+    return encodePayload == true
+      ? encodePayload(
+        createResponsePayload(
+          ((ArtifactRequestMessage) requestHeader).getRequestedArtifact()
+            .toString(),
+          payload
+        )
+          .getBytes()
+      )
+      : createResponsePayload(
+        ((ArtifactRequestMessage) requestHeader).getRequestedArtifact()
+          .toString(),
+        payload
+      );
+  }
 
-	public Message createArtifactResponseMessage(ArtifactRequestMessage header) {
-		// Need to set transferCotract from original message, it will be used in policy enforcement
-		return new ArtifactResponseMessageBuilder()
-				._issuerConnector_(whoIAmEngRDProvider())
-				._issued_(DateUtil.now())
-				._modelVersion_(UtilMessageService.MODEL_VERSION)
-				._transferContract_(header.getTransferContract())
-				._senderAgent_(whoIAmEngRDProvider())
-				._recipientConnector_(header != null ? asList(header.getIssuerConnector()) : asList(whoIAm()))
-				._correlationMessage_(header != null ? header.getId() : whoIAm())
-				._securityToken_(UtilMessageService.getDynamicAttributeToken())
-				.build();
-	}
-	
-	public Message createContractAgreementMessage(ContractRequestMessage header) {
-		return new ContractAgreementMessageBuilder()
-				._modelVersion_(UtilMessageService.MODEL_VERSION)
-				._transferContract_(header.getTransferContract())
-				._correlationMessage_(header != null ? header.getId() : whoIAm())
-				._issued_(DateUtil.now())
-				._issuerConnector_(whoIAmEngRDProvider())
-				._senderAgent_(whoIAmEngRDProvider())
-				._recipientConnector_(Util.asList(header != null ? header.getIssuerConnector() : whoIAm()))
-				._securityToken_(UtilMessageService.getDynamicAttributeToken())
-				._senderAgent_(whoIAmEngRDProvider())
-				.build();
-	}
-	
-	private Message createDescriptionResponseMessage(DescriptionRequestMessage header) {
-		return new DescriptionResponseMessageBuilder()
-				._issuerConnector_(whoIAmEngRDProvider())
-				._issued_(DateUtil.now())
-				._modelVersion_(UtilMessageService.MODEL_VERSION)
-				._recipientConnector_(header != null ? asList(header.getIssuerConnector()) : asList(whoIAm()))
-				._correlationMessage_(header != null ? header.getId() : whoIAm())
-				._securityToken_(UtilMessageService.getDynamicAttributeToken())
-				._senderAgent_(whoIAmEngRDProvider())
-				.build();
-	}
+  private boolean isBigPayload(String path) {
+    String isBig = path.substring(path.lastIndexOf('/'));
+    if (isBig.equals("/big")) {
+      return true;
+    }
+    return false;
+  }
 
-	public Message createRejectionMessage(Message header) {
-		return new RejectionMessageBuilder()
-				._issuerConnector_(whoIAmEngRDProvider())
-				._issued_(DateUtil.now())
-				._modelVersion_(UtilMessageService.MODEL_VERSION)
-				._recipientConnector_(header != null ? asList(header.getIssuerConnector()) : asList(whoIAm()))
-				._correlationMessage_(header != null ? header.getId() : whoIAm())
-				._rejectionReason_(RejectionReason.MALFORMED_MESSAGE)
-				._securityToken_(UtilMessageService.getDynamicAttributeToken())
-				._senderAgent_(whoIAmEngRDProvider())
-				.build();
-	}
+  private String createContractAgreementMyData() {
+    String contractAgreement = null;
+    byte[] bytes;
+    try {
+      bytes =
+        Files.readAllBytes(
+          dataLakeDirectory.resolve("contract_agreement.json")
+        );
+      contractAgreement = IOUtils.toString(bytes, "UTF8");
+    } catch (IOException e) {
+      logger.error(
+        "Error while reading contract agreement file from dataLakeDirectory {}",
+        e
+      );
+    }
+    return contractAgreement;
+  }
 
-	public Message createRejectionToken(Message header) {
-		return new RejectionMessageBuilder()
-				._issuerConnector_(whoIAmEngRDProvider())
-				._issued_(DateUtil.now())
-				._modelVersion_(UtilMessageService.MODEL_VERSION)
-				._recipientConnector_(header != null ? asList(header.getIssuerConnector()) : asList(whoIAm()))
-				._correlationMessage_(header != null ? header.getId() : whoIAm())
-				._rejectionReason_(RejectionReason.NOT_AUTHENTICATED)
-				._securityToken_(UtilMessageService.getDynamicAttributeToken())
-				._senderAgent_(whoIAmEngRDProvider())
-				.build();
-	}
+  public String createResponsePayload(HttpHeaders httpHeaders, String payload) {
+    String requestMessageType = httpHeaders.getFirst("IDS-Messagetype");
+    if (
+      requestMessageType.contains(ContractRequestMessage.class.getSimpleName())
+    ) {
+      //header message is not used (at the moment) so we can pass null here for first parameter
+      return createContractAgreementPlatoon(
+        URI.create(httpHeaders.get("IDS-IssuerConnector").get(0)),
+        payload
+      );
+    } else if (
+      requestMessageType.contains(
+        ContractAgreementMessage.class.getSimpleName()
+      )
+    ) {
+      return null;
+    } else if (
+      requestMessageType.contains(
+        DescriptionRequestMessage.class.getSimpleName()
+      )
+    ) {
+      if (httpHeaders.containsKey("IDS-RequestedElement")) {
+        String element = getRequestedElement(
+          URI.create(httpHeaders.get("IDS-RequestedElement").get(0)),
+          getSelfDescription()
+        );
+        if (StringUtils.isNotBlank(element)) {
+          return element;
+        } else {
+          return (
+            "IDS-RejectionReason:" +
+            RejectionReason.NOT_FOUND.getId().toString()
+          );
+        }
+      } else {
+        return getSelfDescriptionAsString();
+      }
+    } else if (
+      requestMessageType.contains(
+        ArtifactRequestMessage.class.getSimpleName()
+      ) &&
+      isBigPayload(httpHeaders.getFirst("IDS-RequestedArtifact"))
+    ) {
+      return encodePayload == true
+        ? encodePayload(BigPayload.BIG_PAYLOAD.getBytes())
+        : BigPayload.BIG_PAYLOAD;
+    } else {
+      return encodePayload == true
+        ? encodePayload(
+          createResponsePayload(
+            ((ArtifactRequestMessage) httpHeaders).getRequestedArtifact()
+              .toString(),
+            payload
+          )
+            .getBytes()
+        )
+        : createResponsePayload(
+          ((ArtifactRequestMessage) httpHeaders).getRequestedArtifact()
+            .toString(),
+          payload
+        );
+    }
+  }
 
-	private URI whoIAm() {
-		return URI.create("http://auto-generated");
-	}
-	
-	private URI whoIAmEngRDProvider() {
-		return URI.create(issueConnector);
-	}
-	
-	private Message createProcessNotificationMessage(Message header) {
-		return new MessageProcessedNotificationMessageBuilder()
-				._issued_(DateUtil.now())
-				._modelVersion_(UtilMessageService.MODEL_VERSION)
-				._issuerConnector_(whoIAmEngRDProvider())
-				._recipientConnector_(header != null ? asList(header.getIssuerConnector()) : asList(whoIAm()))
-				._correlationMessage_(header != null ? header.getId() : whoIAm())
-				._securityToken_(UtilMessageService.getDynamicAttributeToken())
-				._senderAgent_(whoIAmEngRDProvider())
-				.build();
-	}	
+  private String createResponsePayload(
+    String requested_artifact,
+    String payload
+  ) {
+    // Put check sum in the payload
+    DateFormat dateFormat = new SimpleDateFormat("yyyy/MM/dd HH:mm:ss");
+    Date date = new Date();
+    String formattedDate = dateFormat.format(date);
 
-	public Message createRejectionCommunicationLocalIssues(Message header) {
-		return new RejectionMessageBuilder()
-				._issuerConnector_(whoIAmEngRDProvider())
-				._issued_(DateUtil.now())
-				._modelVersion_(UtilMessageService.MODEL_VERSION)
-				._recipientConnector_(header != null ? asList(header.getIssuerConnector()) : asList(whoIAm()))
-				._correlationMessage_(header != null ? header.getId() : whoIAm())
-				._rejectionReason_(RejectionReason.NOT_FOUND)
-				._securityToken_(UtilMessageService.getDynamicAttributeToken())
-				._senderAgent_(whoIAmEngRDProvider())
-				.build();
-	}
-	
-	/**
-	 * 
-	 * @param header
-	 * @param payload
-	 * @param payloadContentType if is null, using default - application/json, otherwise using the one that is passed as in param
-	 * @return
-	 */
-	public HttpEntity createMultipartMessageForm(String header, String payload, ContentType payloadContentType) {
-		MultipartEntityBuilder multipartEntityBuilder = MultipartEntityBuilder.create()
-				.setStrictMode();
-		
-		ContentType payloadCT =  ContentType.TEXT_PLAIN;
-		
-		if (payloadContentType == null) {
-			if (isValidJSON(payload)) {
-				payloadCT = ContentType.APPLICATION_JSON;
-			}
-		} else {
-			payloadCT = payloadContentType;
-		}
-		
-		try {
-			FormBodyPart bodyHeaderPart;
-			ContentBody headerBody = new StringBody(header, ContentType.create("application/ld+json"));
-			bodyHeaderPart = FormBodyPartBuilder.create("header", headerBody).build();
-			bodyHeaderPart.addField(HTTP.CONTENT_LEN, "" + header.length());
-			multipartEntityBuilder.addPart(bodyHeaderPart);
+    System.out.println("requested_artifact");
+    System.out.println(requested_artifact);
+    System.out.println("payload");
+    System.out.println(payload);
+    JsonObject jsonObjectRequestPayload = new JsonParser()
+      .parse(payload)
+      .getAsJsonObject();
+    if (
+      requested_artifact.equals(
+        "http://w3id.org/plegma_labs/connector/artifact/solar/api/getForecast"
+      )
+    ) {
+      System.out.println("first solar api get forecast");
+      // Call Plegma's PV forecasting API
+      HttpClient client = HttpClient.newHttpClient();
+      String uri = new StringBuilder("http://172.17.0.1:5001/api/getForecast")
+        .append(jsonObjectRequestPayload.get("resourceEndpoints.path"))
+        .toString()
+        .replaceAll("^\"|\"$", "");
+      String clean_uri = uri.replaceAll("\"", "");
+      System.out.println(clean_uri);
+      HttpRequest request = HttpRequest
+        .newBuilder()
+        .uri(URI.create(clean_uri))
+        .header(
+          "Authorization",
+          jsonObjectRequestPayload
+            .get("Authorization")
+            .toString()
+            .replaceAll("\"", "")
+        )
+        .build();
+      String responseString = client
+        .sendAsync(request, HttpResponse.BodyHandlers.ofString())
+        .thenApply(HttpResponse::body)
+        .join();
 
-			FormBodyPart bodyPayloadPart = null;
-			if (payload != null) {
-				ContentBody payloadBody = new StringBody(payload, payloadCT);
-				bodyPayloadPart = FormBodyPartBuilder.create("payload", payloadBody).build();
-				bodyPayloadPart.addField(HTTP.CONTENT_LEN, "" + payload.length());
-				multipartEntityBuilder.addPart(bodyPayloadPart);
-			}
+      System.out.println(responseString);
+      JsonObject jsonObjectRes = new JsonParser()
+        .parse(responseString)
+        .getAsJsonObject();
 
-		} catch (Exception e) {
-			logger.error("Error while creating response ", e);
-		}
-		return multipartEntityBuilder.build();
-	}
-	
-	public boolean isValidJSON(String json) {
-	    try {
-	        JsonParser.parseString(json);
-	    } catch (JsonSyntaxException e) {
-	        return false;
-	    }
-	    return true;
-	}
+      JsonObject obj = new JsonObject();
+      obj.addProperty("checksum", "ABC123 " + formattedDate);
+      obj.add("today", jsonObjectRes.get("today"));
+      obj.addProperty(
+        "total_production_today",
+        jsonObjectRes.get("total_production_today").toString()
+      );
+      obj.add("tomorrow", jsonObjectRes.get("tomorrow"));
+      obj.addProperty(
+        "total_production_tomorrow",
+        jsonObjectRes.get("total_production_today").toString()
+      );
 
-	public static MultiValueMap<String, String> REMOVE_IDS_MESSAGE_HEADERS(HttpHeaders headers) {
-		MultiValueMap<String, String> newHeaders = new LinkedMultiValueMap<>();
-		newHeaders.putAll(headers);
-		for (Iterator<String> iterator = newHeaders.keySet().iterator(); iterator.hasNext();) {
-			String key = iterator.next();
-			//String.contains is case sensitive so this should have minimal margin of error
-			if (key.contains("IDS-")) {
-				iterator.remove();
-			}
-		}
-		return newHeaders;
-	}
+      return obj.toString();
+    } else if (
+      requested_artifact.equals(
+        "http://w3id.org/plegma_labs/connector/artifact/demand_forecast/get_24h_forecast"
+      )
+    ) {
+      // api request
+      HttpClient client = HttpClient.newHttpClient();
+      HttpRequest request = HttpRequest
+        .newBuilder()
+        .uri(
+          URI.create("http://172.17.0.1:5000/demand_forecast/get_24h_forecast")
+        )
+        .header("Content-type", "application/json")
+        .POST(
+          HttpRequest.BodyPublishers.ofString(
+            jsonObjectRequestPayload.get("data").getAsString()
+          )
+        )
+        .build();
+      try {
+        String responseString = client
+          .sendAsync(request, HttpResponse.BodyHandlers.ofString())
+          .thenApply(HttpResponse::body)
+          .join();
+
+        System.out.println(responseString);
+        JsonObject jsonObjectRes = new JsonParser()
+          .parse(responseString)
+          .getAsJsonObject();
+
+        JsonObject obj = new JsonObject();
+        obj.addProperty("checksum", "ABC123 " + formattedDate);
+        obj.add("predictions", jsonObjectRes.get("predictions"));
+
+        return obj.toString();
+      } catch (Exception ex) {
+        System.out.println(ex.toString());
+      }
+    } else if (
+      requested_artifact.equals(
+        "http://w3id.org/plegma_labs/connector/artifact/schedule"
+      )
+    ) {
+      // api request
+      HttpClient client = HttpClient.newHttpClient();
+      HttpRequest request = HttpRequest
+        .newBuilder()
+        .uri(URI.create("http://172.17.0.1:5002/schedule"))
+        .headers(
+          "Content-type",
+          "application/json",
+          "Authorization",
+          jsonObjectRequestPayload
+            .get("Authorization")
+            .toString()
+            .replaceAll("\"", "")
+        )
+        .POST(
+          HttpRequest.BodyPublishers.ofString(
+            jsonObjectRequestPayload.get("data").getAsString()
+          )
+        )
+        .build();
+      try {
+        String responseString = client
+          .sendAsync(request, HttpResponse.BodyHandlers.ofString())
+          .thenApply(HttpResponse::body)
+          .join();
+
+        System.out.println(responseString);
+        JsonObject jsonObjectRes = new JsonParser()
+          .parse(responseString)
+          .getAsJsonObject();
+
+        JsonObject obj = new JsonObject();
+        obj.addProperty("checksum", "ABC123 " + formattedDate);
+        obj.add("device", jsonObjectRes.get("device"));
+        obj.add("solution", jsonObjectRes.get("solution"));
+
+        return obj.toString();
+      } catch (Exception ex) {
+        System.out.println(ex.toString());
+      }
+    } else if (
+      requested_artifact.equals(
+        "http://w3id.org/plegma_labs/connector/artifact/solar/api/login"
+      )
+    ) {
+      // api request
+      HttpClient client = HttpClient.newHttpClient();
+      HttpRequest request = HttpRequest
+        .newBuilder()
+        .uri(URI.create("http://172.17.0.1:5001/api/login"))
+        .header("Content-type", "application/json")
+        .POST(
+          HttpRequest.BodyPublishers.ofString(
+            jsonObjectRequestPayload.get("data").getAsString()
+          )
+        )
+        .build();
+      try {
+        String responseString = client
+          .sendAsync(request, HttpResponse.BodyHandlers.ofString())
+          .thenApply(HttpResponse::body)
+          .join();
+
+        System.out.println(responseString);
+        JsonObject jsonObjectRes = new JsonParser()
+          .parse(responseString)
+          .getAsJsonObject();
+
+        JsonObject obj = new JsonObject();
+        obj.addProperty("checksum", "ABC123 " + formattedDate);
+        obj.add("access_token", jsonObjectRes.get("access_token"));
+
+        return obj.toString();
+      } catch (Exception ex) {
+        System.out.println(ex.toString());
+      }
+    }
+    return null;
+  }
+
+  private String encodePayload(byte[] payload) {
+    logger.info("Encoding payload");
+    return Base64.getEncoder().encodeToString(payload);
+  }
+
+  private String createContractAgreementPlatoon(
+    URI consumerURI,
+    String payload
+  ) {
+    try {
+      Connector connector = getSelfDescription();
+      ContractRequest contractRequest = serializer.deserialize(
+        payload,
+        ContractRequest.class
+      );
+
+      ContractOffer co = getPermissionAndTarget(
+        connector,
+        contractRequest.getPermission().get(0).getId(),
+        contractRequest.getPermission().get(0).getTarget()
+      );
+      List<Permission> permissions = new ArrayList<>();
+      if (co == null) {
+        logger.info(
+          "Could not find contract offer that match with request - permissionId and target"
+        );
+        return null;
+      }
+      for (Permission p : co.getPermission()) {
+        if (
+          p.getId().equals(contractRequest.getPermission().get(0).getId()) &&
+          p
+            .getTarget()
+            .equals(contractRequest.getPermission().get(0).getTarget())
+        ) {
+          permissions.add(p);
+        }
+      }
+      ContractAgreement ca = new ContractAgreementBuilder()
+        ._permission_(permissions)
+        ._contractStart_(co.getContractStart())
+        ._contractDate_(co.getContractDate())
+        ._consumer_(consumerURI)
+        ._provider_(URI.create(issueConnector))
+        .build();
+
+      return MultipartMessageProcessor.serializeToJsonLD(ca);
+    } catch (IOException e) {
+      logger.error("Error while creating contract agreement", e);
+    }
+    return null;
+  }
+
+  private ContractOffer getPermissionAndTarget(
+    Connector connector,
+    URI permission,
+    URI target
+  ) {
+    for (ResourceCatalog resourceCatalog : connector.getResourceCatalog()) {
+      for (Resource resource : resourceCatalog.getOfferedResource()) {
+        for (ContractOffer co : resource.getContractOffer()) {
+          for (Permission p : co.getPermission()) {
+            if (p.getId().equals(permission) && p.getTarget().equals(target)) {
+              logger.info("Found permission");
+              return co;
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  private Connector getSelfDescription() {
+    URI eccURI = null;
+
+    try {
+      eccURI =
+        new URI(
+          eccProperties.getRESTprotocol(),
+          null,
+          eccProperties.getHost(),
+          eccProperties.getRESTport(),
+          null,
+          null,
+          null
+        );
+      logger.info("Fetching self description from ECC {}.", eccURI.toString());
+      String selfDescription = restTemplate.getForObject(eccURI, String.class);
+      logger.info("Deserializing self description.");
+      logger.debug(
+        "Self description content: {}{}",
+        System.lineSeparator(),
+        selfDescription
+      );
+      return serializer.deserialize(selfDescription, Connector.class);
+    } catch (URISyntaxException e) {
+      logger.error("Could not create URI for Self Description request.", e);
+      return null;
+    } catch (RestClientException e) {
+      logger.error("Could not fetch self description from ECC", e);
+      return null;
+    } catch (IOException e) {
+      logger.error(
+        "Could not deserialize self description to Connector instance",
+        e
+      );
+      return null;
+    }
+  }
+
+  private String getSelfDescriptionAsString() {
+    try {
+      return MultipartMessageProcessor.serializeToJsonLD(getSelfDescription());
+    } catch (IOException e) {
+      logger.error("Could not serialize self description", e);
+    }
+    return null;
+  }
+
+  private String getRequestedElement(
+    URI requestedElement,
+    Connector connector
+  ) {
+    for (ResourceCatalog catalog : connector.getResourceCatalog()) {
+      for (Resource offeredResource : catalog.getOfferedResource()) {
+        if (requestedElement.equals(offeredResource.getId())) {
+          try {
+            return MultipartMessageProcessor.serializeToJsonLD(offeredResource);
+          } catch (IOException e) {
+            logger.error("Could not serialize requested element.", e);
+          }
+        }
+      }
+    }
+    logger.error("Requested element not found.");
+    return null;
+  }
+
+  public Message getResponseHeader(Message header) {
+    Message output = null;
+    if (
+      null == header ||
+      null == header.getId() ||
+      header.getId().toString().isEmpty()
+    ) header =
+      new NotificationMessageBuilder()
+        ._securityToken_(UtilMessageService.getDynamicAttributeToken())
+        ._senderAgent_(whoIAmEngRDProvider())
+        .build();
+    if (header instanceof ArtifactRequestMessage) {
+      output = createArtifactResponseMessage((ArtifactRequestMessage) header);
+    } else if (header instanceof ContractRequestMessage) {
+      if (contractNegotiationDemo) {
+        logger.info("Returning default contract agreement");
+        output =
+          createContractAgreementMessage((ContractRequestMessage) header);
+      } else {
+        logger.info(
+          "Creating processed notification, contract agreement needs evaluation"
+        );
+        output = createProcessNotificationMessage(null);
+      }
+    } else if (header instanceof ContractAgreementMessage) {
+      output = createProcessNotificationMessage(header);
+    } else if (header instanceof DescriptionRequestMessage) {
+      output =
+        createDescriptionResponseMessage((DescriptionRequestMessage) header);
+    } else {
+      output = createResultMessage(header);
+    }
+    return output;
+  }
+
+  public Message createResultMessage(Message header) {
+    return new ResultMessageBuilder()
+      ._issuerConnector_(whoIAmEngRDProvider())
+      ._issued_(DateUtil.now())
+      ._modelVersion_(UtilMessageService.MODEL_VERSION)
+      ._senderAgent_(whoIAmEngRDProvider())
+      ._recipientConnector_(
+        header != null ? asList(header.getIssuerConnector()) : asList(whoIAm())
+      )
+      ._correlationMessage_(header != null ? header.getId() : whoIAm())
+      ._securityToken_(UtilMessageService.getDynamicAttributeToken())
+      .build();
+  }
+
+  public Message createArtifactResponseMessage(ArtifactRequestMessage header) {
+    // Need to set transferCotract from original message, it will be used in policy enforcement
+    return new ArtifactResponseMessageBuilder()
+      ._issuerConnector_(whoIAmEngRDProvider())
+      ._issued_(DateUtil.now())
+      ._modelVersion_(UtilMessageService.MODEL_VERSION)
+      ._transferContract_(header.getTransferContract())
+      ._senderAgent_(whoIAmEngRDProvider())
+      ._recipientConnector_(
+        header != null ? asList(header.getIssuerConnector()) : asList(whoIAm())
+      )
+      ._correlationMessage_(header != null ? header.getId() : whoIAm())
+      ._securityToken_(UtilMessageService.getDynamicAttributeToken())
+      .build();
+  }
+
+  public Message createContractAgreementMessage(ContractRequestMessage header) {
+    return new ContractAgreementMessageBuilder()
+      ._modelVersion_(UtilMessageService.MODEL_VERSION)
+      ._transferContract_(header.getTransferContract())
+      ._correlationMessage_(header != null ? header.getId() : whoIAm())
+      ._issued_(DateUtil.now())
+      ._issuerConnector_(whoIAmEngRDProvider())
+      ._senderAgent_(whoIAmEngRDProvider())
+      ._recipientConnector_(
+        Util.asList(header != null ? header.getIssuerConnector() : whoIAm())
+      )
+      ._securityToken_(UtilMessageService.getDynamicAttributeToken())
+      ._senderAgent_(whoIAmEngRDProvider())
+      .build();
+  }
+
+  private Message createDescriptionResponseMessage(
+    DescriptionRequestMessage header
+  ) {
+    return new DescriptionResponseMessageBuilder()
+      ._issuerConnector_(whoIAmEngRDProvider())
+      ._issued_(DateUtil.now())
+      ._modelVersion_(UtilMessageService.MODEL_VERSION)
+      ._recipientConnector_(
+        header != null ? asList(header.getIssuerConnector()) : asList(whoIAm())
+      )
+      ._correlationMessage_(header != null ? header.getId() : whoIAm())
+      ._securityToken_(UtilMessageService.getDynamicAttributeToken())
+      ._senderAgent_(whoIAmEngRDProvider())
+      .build();
+  }
+
+  public Message createRejectionMessage(Message header) {
+    return new RejectionMessageBuilder()
+      ._issuerConnector_(whoIAmEngRDProvider())
+      ._issued_(DateUtil.now())
+      ._modelVersion_(UtilMessageService.MODEL_VERSION)
+      ._recipientConnector_(
+        header != null ? asList(header.getIssuerConnector()) : asList(whoIAm())
+      )
+      ._correlationMessage_(header != null ? header.getId() : whoIAm())
+      ._rejectionReason_(RejectionReason.MALFORMED_MESSAGE)
+      ._securityToken_(UtilMessageService.getDynamicAttributeToken())
+      ._senderAgent_(whoIAmEngRDProvider())
+      .build();
+  }
+
+  public Message createRejectionToken(Message header) {
+    return new RejectionMessageBuilder()
+      ._issuerConnector_(whoIAmEngRDProvider())
+      ._issued_(DateUtil.now())
+      ._modelVersion_(UtilMessageService.MODEL_VERSION)
+      ._recipientConnector_(
+        header != null ? asList(header.getIssuerConnector()) : asList(whoIAm())
+      )
+      ._correlationMessage_(header != null ? header.getId() : whoIAm())
+      ._rejectionReason_(RejectionReason.NOT_AUTHENTICATED)
+      ._securityToken_(UtilMessageService.getDynamicAttributeToken())
+      ._senderAgent_(whoIAmEngRDProvider())
+      .build();
+  }
+
+  private URI whoIAm() {
+    return URI.create("http://auto-generated");
+  }
+
+  private URI whoIAmEngRDProvider() {
+    return URI.create(issueConnector);
+  }
+
+  private Message createProcessNotificationMessage(Message header) {
+    return new MessageProcessedNotificationMessageBuilder()
+      ._issued_(DateUtil.now())
+      ._modelVersion_(UtilMessageService.MODEL_VERSION)
+      ._issuerConnector_(whoIAmEngRDProvider())
+      ._recipientConnector_(
+        header != null ? asList(header.getIssuerConnector()) : asList(whoIAm())
+      )
+      ._correlationMessage_(header != null ? header.getId() : whoIAm())
+      ._securityToken_(UtilMessageService.getDynamicAttributeToken())
+      ._senderAgent_(whoIAmEngRDProvider())
+      .build();
+  }
+
+  public Message createRejectionCommunicationLocalIssues(Message header) {
+    return new RejectionMessageBuilder()
+      ._issuerConnector_(whoIAmEngRDProvider())
+      ._issued_(DateUtil.now())
+      ._modelVersion_(UtilMessageService.MODEL_VERSION)
+      ._recipientConnector_(
+        header != null ? asList(header.getIssuerConnector()) : asList(whoIAm())
+      )
+      ._correlationMessage_(header != null ? header.getId() : whoIAm())
+      ._rejectionReason_(RejectionReason.NOT_FOUND)
+      ._securityToken_(UtilMessageService.getDynamicAttributeToken())
+      ._senderAgent_(whoIAmEngRDProvider())
+      .build();
+  }
+
+  /**
+   *
+   * @param header
+   * @param payload
+   * @param payloadContentType if is null, using default - application/json, otherwise using the one that is passed as in param
+   * @return
+   */
+  public HttpEntity createMultipartMessageForm(
+    String header,
+    String payload,
+    ContentType payloadContentType
+  ) {
+    MultipartEntityBuilder multipartEntityBuilder = MultipartEntityBuilder
+      .create()
+      .setStrictMode();
+
+    ContentType payloadCT = ContentType.TEXT_PLAIN;
+
+    if (payloadContentType == null) {
+      if (isValidJSON(payload)) {
+        payloadCT = ContentType.APPLICATION_JSON;
+      }
+    } else {
+      payloadCT = payloadContentType;
+    }
+
+    try {
+      FormBodyPart bodyHeaderPart;
+      ContentBody headerBody = new StringBody(
+        header,
+        ContentType.create("application/ld+json")
+      );
+      bodyHeaderPart = FormBodyPartBuilder.create("header", headerBody).build();
+      bodyHeaderPart.addField(HTTP.CONTENT_LEN, "" + header.length());
+      multipartEntityBuilder.addPart(bodyHeaderPart);
+
+      FormBodyPart bodyPayloadPart = null;
+      if (payload != null) {
+        ContentBody payloadBody = new StringBody(payload, payloadCT);
+        bodyPayloadPart =
+          FormBodyPartBuilder.create("payload", payloadBody).build();
+        bodyPayloadPart.addField(HTTP.CONTENT_LEN, "" + payload.length());
+        multipartEntityBuilder.addPart(bodyPayloadPart);
+      }
+    } catch (Exception e) {
+      logger.error("Error while creating response ", e);
+    }
+    return multipartEntityBuilder.build();
+  }
+
+  public boolean isValidJSON(String json) {
+    try {
+      JsonParser.parseString(json);
+    } catch (JsonSyntaxException e) {
+      return false;
+    }
+    return true;
+  }
+
+  public static MultiValueMap<String, String> REMOVE_IDS_MESSAGE_HEADERS(
+    HttpHeaders headers
+  ) {
+    MultiValueMap<String, String> newHeaders = new LinkedMultiValueMap<>();
+    newHeaders.putAll(headers);
+    for (
+      Iterator<String> iterator = newHeaders.keySet().iterator();
+      iterator.hasNext();
+    ) {
+      String key = iterator.next();
+      //String.contains is case sensitive so this should have minimal margin of error
+      if (key.contains("IDS-")) {
+        iterator.remove();
+      }
+    }
+    return newHeaders;
+  }
 }
