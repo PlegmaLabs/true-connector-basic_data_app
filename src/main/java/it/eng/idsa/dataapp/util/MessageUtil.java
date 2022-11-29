@@ -473,6 +473,42 @@ public class MessageUtil {
       } catch (Exception ex) {
         System.out.println(ex.toString());
       }
+    } else if (
+      requested_artifact.equals(
+        "http://w3id.org/plegma_labs/connector/artifact/airquality/aqi"
+      )
+    ) {
+      // api request
+      HttpClient client = HttpClient.newHttpClient();
+      HttpRequest request = HttpRequest
+        .newBuilder()
+        .uri(URI.create("http://172.17.0.1:5002/aqi"))
+        .header("Content-type", "application/json")
+        .POST(
+          HttpRequest.BodyPublishers.ofString(
+            jsonObjectRequestPayload.get("data").getAsString()
+          )
+        )
+        .build();
+      try {
+        String responseString = client
+          .sendAsync(request, HttpResponse.BodyHandlers.ofString())
+          .thenApply(HttpResponse::body)
+          .join();
+
+        System.out.println(responseString);
+        JsonObject jsonObjectRes = new JsonParser()
+          .parse(responseString)
+          .getAsJsonObject();
+
+        JsonObject obj = new JsonObject();
+        obj.addProperty("checksum", "ABC123 " + formattedDate);
+        obj.add("predictions", jsonObjectRes.get("predictions"));
+
+        return obj.toString();
+      } catch (Exception ex) {
+        System.out.println(ex.toString());
+      }
     }
     return null;
   }
